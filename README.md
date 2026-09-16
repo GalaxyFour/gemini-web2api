@@ -13,7 +13,7 @@ Convert Google Gemini's web interface into an OpenAI-compatible API. Zero cost, 
 - **Optional API Keys**: no auth when `api_keys` is empty, OpenAI-style Bearer auth when configured
 - **OpenAI Compatible**: Drop-in replacement for `/v1/chat/completions` and `/v1/models`
 - **Tool Calling**: Full function calling support (OpenAI format)
-- **Multiple Models**: Flash (3.6), Extended Thinking (20k+ char output), Pro, Auto, Lite
+- **Multiple Models**: Flash (3.8), Extended Thinking (20k+ char output), Pro, Auto, Lite
 - **Thinking Depth**: Adjustable via `@think=N` suffix (0=deepest, 4=shallowest)
 - **Web Search**: Built-in internet access (Gemini's native search)
 - **Cross-Platform**: Pure Python, single optional dependency (`httpx` for streaming)
@@ -88,10 +88,15 @@ Supports Google native API endpoints:
 
 | Model | Description | Output |
 |-------|-------------|--------|
-| `gemini-3.6-flash` | All-around model (latest) | ~12k chars |
-| `gemini-3.5-flash` | Alias for gemini-3.6-flash | ~12k chars |
+| `gemini-3.8-flash` | Workhorse model, best reasoning & coding (latest) | ~12k chars |
+| `gemini-3.8-flash-thinking` | Extended thinking on latest Flash backend | **~20k chars** |
+| `gemini-3.7-flash` | All-around model | ~12k chars |
+| `gemini-3.6-flash` | All-around model | ~12k chars |
+| `gemini-3.5-flash` | All-around model | ~12k chars |
 | `gemini-3.5-flash-thinking` | Extended thinking, longest output | **~20k chars** |
 | `gemini-3.5-flash-thinking-lite` | Adaptive thinking depth | ~15k chars |
+| `gemini-3.5-flash-lite` | Cost-efficient, high capacity | ~10k chars |
+| `gemini-3.1-flash-lite` | Cost-efficient, high capacity | ~10k chars |
 | `gemini-3.1-pro` | Advanced math & code (needs cookie) | ~12k chars |
 | `gemini-auto` | Auto model selection | varies |
 | `gemini-flash-lite` | Fastest answers, lightweight | ~10k chars |

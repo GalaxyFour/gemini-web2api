@@ -71,9 +71,17 @@ CONFIG = dict(DEFAULT_CONFIG)
 #   1=FAST, 2=THINKING, 3=PRO, 4=AUTO, 5=FAST_DYNAMIC_THINKING, 6=FLASH_LITE
 
 MODELS = {
+    "gemini-3.8-flash": {
+        "mode": 1, "think": 4,
+        "desc": "Latest workhorse model, best reasoning & coding (Sep 2026)",
+    },
+    "gemini-3.8-flash-thinking": {
+        "mode": 2, "think": 0,
+        "desc": "Deep thinking mode on the latest Flash backend",
+    },
     "gemini-3.7-flash": {
         "mode": 1, "think": 4,
-        "desc": "Latest all-around model (Gemini 3.7 Flash)",
+        "desc": "All-around model (Gemini 3.7 Flash)",
     },
     "gemini-3.6-flash": {
         "mode": 1, "think": 4,
@@ -81,7 +89,15 @@ MODELS = {
     },
     "gemini-3.5-flash": {
         "mode": 1, "think": 4,
-        "desc": "Alias for gemini-3.6-flash (backend upgraded)",
+        "desc": "All-around model (Gemini 3.5 Flash)",
+    },
+    "gemini-3.5-flash-lite": {
+        "mode": 6, "think": 4,
+        "desc": "Cost-efficient high-capacity model (Gemini 3.5 Flash-Lite)",
+    },
+    "gemini-3.1-flash-lite": {
+        "mode": 6, "think": 4,
+        "desc": "Cost-efficient high-capacity model (Gemini 3.1 Flash-Lite)",
     },
     "gemini-3.5-flash-thinking": {
         "mode": 2, "think": 0,
@@ -615,25 +631,133 @@ def google_contents_to_prompt(req: dict) -> tuple:
     return "\n\n".join(part for part in parts if part), images
 
 
-def parse_tool_calls(text: str) -> tuple:
-    """Extract tool_call blocks. Returns (clean_text, tool_calls_list)."""
-    tool_calls = []
-    pattern = r'```tool_call\s*\n(.*?)\n```'
-    for match in re.findall(pattern, text, re.DOTALL):
+def tool_names(tools: list) -> set:
+    """Extract declared function names from an OpenAI tools list."""
+    names = set()
+    for tool in tools or []:
+        fn = tool.get("function", tool) if tool.get("type") == "function" else tool
+        name = fn.get("name") if isinstance(fn, dict) else None
+        if name:
+            names.add(name)
+    return names
+
+
+def _safe_json_loads(raw: str):
+    try:
+        return json.loads(raw.strip())
+    except (json.JSONDecodeError, ValueError, AttributeError):
+        return None
+
+
+def _coerce_tool_data(data) -> dict | None:
+    """Validate a parsed candidate as {"name": ..., "arguments": {...}}."""
+    if not isinstance(data, dict):
+        return None
+    name = data.get("name")
+    if not name or not isinstance(name, str):
+        return None
+    args = data.get("arguments", data.get("args", {}))
+    if isinstance(args, str):
         try:
-            data = json.loads(match.strip())
-            tool_calls.append({
-                "id": f"call_{uuid.uuid4().hex[:8]}",
-                "type": "function",
-                "function": {
-                    "name": data["name"],
-                    "arguments": json.dumps(data.get("arguments", {}), ensure_ascii=False),
-                },
-            })
-        except (json.JSONDecodeError, KeyError):
+            args = json.loads(args)
+        except (json.JSONDecodeError, ValueError):
+            args = {}
+    if not isinstance(args, dict):
+        args = {}
+    return {"name": name, "arguments": args}
+
+
+def _parse_bracket_args(raw: str):
+    """Parse bracket-shorthand args, tolerating a trailing extra brace."""
+    try:
+        return json.loads(raw)
+    except (json.JSONDecodeError, ValueError):
+        pass
+    if raw.rstrip().endswith("}"):
+        try:
+            return json.loads(raw.rstrip()[:-1])
+        except (json.JSONDecodeError, ValueError):
             pass
-    clean = re.sub(pattern, '', text, flags=re.DOTALL).strip()
-    return clean, tool_calls
+    return None
+
+
+def parse_tool_calls(text: str, valid_names: set = None) -> tuple:
+    """Extract tool_call blocks. Returns (clean_text, tool_calls_list).
+
+    Accepts the formats models emit in practice:
+    1. ```tool_call\\n{"name": ..., "arguments": {...}}\\n``` (canonical)
+    2. ```function_call\\n{...}\\n``` (common variant)
+    3. ```json\\n{"name": ..., "arguments": {...}}\\n``` (bare JSON fence)
+    4. [tool_call: name {...}] (bracket shorthand)
+    5. Raw {"name": ..., "arguments"/"args": {...}} object
+
+    Fences that do not parse as a tool call (e.g. a legit ```json code
+    sample) are left untouched. When valid_names is given, calls to
+    undeclared tools are dropped so clients don't choke on hallucinated
+    tool names.
+    """
+    spans = []  # (start, end, {"name":..., "arguments":...})
+
+    def _collect(pattern):
+        for m in re.finditer(pattern, text, re.DOTALL):
+            data = _coerce_tool_data(_safe_json_loads(m.group(1)))
+            if data:
+                spans.append((m.start(), m.end(), data))
+
+    _collect(r'```tool_call\s*\n(.*?)\n```')
+    _collect(r'```function_call\s*\n(.*?)\n```')
+    _collect(r'```json\s*\n(.*?)\n```')
+
+    for m in re.finditer(r'\[tool_call\s*:\s*([A-Za-z0-9_.\-]+)\s*(\{.*\})\s*\]',
+                         text, re.DOTALL):
+        args = _parse_bracket_args(m.group(2).strip())
+        if args is not None:
+            data = _coerce_tool_data({"name": m.group(1), "arguments": args})
+            if data:
+                spans.append((m.start(), m.end(), data))
+
+    spans.sort()
+    # Drop overlapping spans (keep the earliest match).
+    merged = []
+    for span in spans:
+        if merged and span[0] < merged[-1][1]:
+            continue
+        merged.append(span)
+
+    clean_parts = []
+    last_end = 0
+    tool_calls = []
+    for start, end, data in merged:
+        clean_parts.append(text[last_end:start])
+        last_end = end
+        if valid_names is not None and data["name"] not in valid_names:
+            continue
+        tool_calls.append({
+            "id": f"call_{uuid.uuid4().hex[:8]}",
+            "type": "function",
+            "function": {
+                "name": data["name"],
+                "arguments": json.dumps(data.get("arguments", {}), ensure_ascii=False),
+            },
+        })
+    clean_parts.append(text[last_end:])
+
+    if not tool_calls:
+        stripped = text.strip()
+        if stripped.startswith("{") and stripped.endswith("}"):
+            data = _coerce_tool_data(_safe_json_loads(stripped))
+            if data and (valid_names is None or data["name"] in valid_names):
+                tool_calls.append({
+                    "id": f"call_{uuid.uuid4().hex[:8]}",
+                    "type": "function",
+                    "function": {
+                        "name": data["name"],
+                        "arguments": json.dumps(data.get("arguments", {}), ensure_ascii=False),
+                    },
+                })
+                return "", tool_calls
+
+    return "".join(clean_parts).strip(), tool_calls
 
 
 # ─── HTTP Handler ────────────────────────────────────────────────────────────
@@ -767,8 +891,34 @@ class GeminiHandler(BaseHTTPRequestHandler):
         text = extract_response_text(raw)
         tool_calls = None
         if tools and text:
-            text, tool_calls = parse_tool_calls(text)
+            text, tool_calls = parse_tool_calls(text, tool_names(tools))
         return text or "", tool_calls
+
+    def stream_tool_calls(self, cid, model_name, tool_calls, arg_slice=120):
+        """Emit tool calls as OpenAI-spec streaming deltas with `index`."""
+        def chunk(delta, finish_reason=None):
+            return {"id": cid, "object": "chat.completion.chunk", "created": int(time.time()),
+                    "model": model_name,
+                    "choices": [{"index": 0, "delta": delta, "finish_reason": finish_reason}]}
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        self.wfile.write(f"data: {json.dumps(chunk({'role': 'assistant'}), ensure_ascii=False)}\n\n".encode())
+        for i, tc in enumerate(tool_calls):
+            fn = tc.get("function", {})
+            head = {"role": "assistant",
+                    "tool_calls": [{"index": i, "id": tc.get("id"), "type": "function",
+                                    "function": {"name": fn.get("name", ""), "arguments": ""}}]}
+            self.wfile.write(f"data: {json.dumps(chunk(head), ensure_ascii=False)}\n\n".encode())
+            args = fn.get("arguments", "") or ""
+            for j in range(0, len(args), arg_slice):
+                piece = {"tool_calls": [{"index": i, "function": {"arguments": args[j:j + arg_slice]}}]}
+                self.wfile.write(f"data: {json.dumps(chunk(piece), ensure_ascii=False)}\n\n".encode())
+        self.wfile.write(f"data: {json.dumps(chunk({}, 'tool_calls'))}\n\n".encode())
+        self.wfile.write(b"data: [DONE]\n\n")
+        self.wfile.flush()
 
     def handle_chat(self, body: bytes):
         req = json.loads(body)
@@ -833,17 +983,20 @@ class GeminiHandler(BaseHTTPRequestHandler):
         finish = "tool_calls" if tool_calls else "stop"
 
         if stream:
-            # Stream mode with tools: send as single chunk (need full parse for tool_calls)
-            self.send_response(200)
-            self.send_header("Content-Type", "text/event-stream")
-            self.send_header("Cache-Control", "no-cache")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            chunk = {"id": cid, "object": "chat.completion.chunk", "created": int(time.time()),
-                     "model": model_name, "choices": [{"index": 0, "delta": msg, "finish_reason": finish}]}
-            self.wfile.write(f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode())
-            self.wfile.write(b"data: [DONE]\n\n")
-            self.wfile.flush()
+            if tool_calls:
+                # Stream mode with tools: OpenAI-spec deltas with `index`
+                self.stream_tool_calls(cid, model_name, tool_calls)
+            else:
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Access-Control-Allow-Origin", "*")
+                self.end_headers()
+                chunk = {"id": cid, "object": "chat.completion.chunk", "created": int(time.time()),
+                         "model": model_name, "choices": [{"index": 0, "delta": msg, "finish_reason": finish}]}
+                self.wfile.write(f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n".encode())
+                self.wfile.write(b"data: [DONE]\n\n")
+                self.wfile.flush()
         else:
             self.send_json({
                 "id": cid, "object": "chat.completion", "created": int(time.time()),
