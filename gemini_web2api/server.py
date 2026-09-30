@@ -6,7 +6,7 @@ import re
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from socketserver import ThreadingMixIn
 
-from .config import CONFIG
+from .config import CONFIG, get_all_api_keys, resolve_account_from_config, set_current_account, get_current_account
 from .models import MODELS, resolve_model
 from .gemini import generate, generate_stream, log
 from .tools import messages_to_prompt, parse_tool_calls, google_contents_to_prompt, parse_google_function_calls, tool_names
@@ -96,24 +96,46 @@ class GeminiHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         return self.rfile.read(length) if length else b""
 
-    def _authorized(self):
-        keys = CONFIG.get("api_keys") or []
-        if not keys:
-            return True
-        # Authorization: Bearer <key>
+    def _extract_api_key(self):
         auth = self.headers.get("Authorization", "")
-        if auth.startswith("Bearer ") and auth[7:] in keys:
-            return True
-        # header keys (OpenAI x-api-key / Google x-goog-api-key)
+        if auth.startswith("Bearer "):
+            return auth[7:].strip()
         for h in ("x-api-key", "x-goog-api-key"):
-            if self.headers.get(h, "") in keys:
-                return True
-        # query param ?key= (Gemini CLI native style)
+            val = self.headers.get(h)
+            if val:
+                return val.strip()
         if "?" in self.path:
             for pair in self.path.split("?", 1)[1].split("&"):
-                if pair.startswith("key=") and pair[4:] in keys:
-                    return True
-        return False
+                if pair.startswith("key="):
+                    return pair[4:].strip()
+        return None
+
+    def _authorized(self):
+        all_keys = get_all_api_keys(CONFIG)
+        if not all_keys:
+            return True
+        key = self._extract_api_key()
+        if not key or key not in all_keys:
+            return False
+        if get_current_account() is None:
+            account = resolve_account_from_config(CONFIG, key)
+            if account:
+                set_current_account(account)
+        return True
+
+    def parse_request(self):
+        if not super().parse_request():
+            return False
+        key = self._extract_api_key()
+        account = resolve_account_from_config(CONFIG, key)
+        set_current_account(account)
+        return True
+
+    def handle_one_request(self):
+        try:
+            super().handle_one_request()
+        finally:
+            set_current_account(None)
 
     def do_OPTIONS(self):
         self.send_response(204)

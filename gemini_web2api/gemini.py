@@ -18,7 +18,7 @@ except ImportError:
 from .config import CONFIG
 
 _ssl_ctx = None
-_cookie_cache = {"str": "", "sapisid": None, "mtime": 0}
+_cookie_cache = {}
 _httpx_client = None
 
 
@@ -46,14 +46,15 @@ def _get_httpx_client():
 
 
 def load_cookie() -> tuple:
-    """Load cookie from file with mtime-based caching."""
+    """Load cookie from file with per-file mtime-based caching."""
     cookie_file = CONFIG.get("cookie_file")
     if not cookie_file or not os.path.exists(cookie_file):
         return "", None
     try:
         mtime = os.path.getmtime(cookie_file)
-        if mtime == _cookie_cache["mtime"] and _cookie_cache["str"]:
-            return _cookie_cache["str"], _cookie_cache["sapisid"]
+        cached = _cookie_cache.get(cookie_file)
+        if cached and mtime == cached.get("mtime") and cached.get("str"):
+            return cached["str"], cached["sapisid"]
         with open(cookie_file, "r") as f:
             content = f.read().strip()
         if content.startswith("{"):
@@ -64,11 +65,12 @@ def load_cookie() -> tuple:
             cookie_str = content
             pairs = dict(p.split("=", 1) for p in cookie_str.split("; ") if "=" in p)
             sapisid = pairs.get("SAPISID", "")
-        _cookie_cache.update({"str": cookie_str, "sapisid": sapisid or None, "mtime": mtime})
+        _cookie_cache[cookie_file] = {"str": cookie_str, "sapisid": sapisid or None, "mtime": mtime}
         return cookie_str, sapisid if sapisid else None
     except Exception as e:
         log(f"Cookie load error: {e}")
-        return _cookie_cache["str"], _cookie_cache["sapisid"]
+        cached = _cookie_cache.get(cookie_file, {})
+        return cached.get("str", ""), cached.get("sapisid")
 
 
 def make_sapisidhash(sapisid: str) -> str:

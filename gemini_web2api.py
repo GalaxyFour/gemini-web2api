@@ -47,6 +47,43 @@ __version__ = "1.1.0"
 
 # ─── Configuration ───────────────────────────────────────────────────────────
 
+import threading
+
+_request_context = threading.local()
+
+
+def set_current_account(account=None):
+    """Set the active account mapping for the current request thread."""
+    _request_context.account = account
+
+
+def get_current_account():
+    """Get the active account mapping for the current request thread."""
+    return getattr(_request_context, "account", None)
+
+
+class ContextConfig(dict):
+    """Dict wrapper that dynamically resolves account overrides for the active request thread."""
+
+    def get(self, key, default=None):
+        acc = get_current_account()
+        if acc is not None and key in acc:
+            return acc[key]
+        return super().get(key, default)
+
+    def __getitem__(self, key):
+        acc = get_current_account()
+        if acc is not None and key in acc:
+            return acc[key]
+        return super().__getitem__(key)
+
+    def __contains__(self, key):
+        acc = get_current_account()
+        if acc is not None and key in acc:
+            return True
+        return super().__contains__(key)
+
+
 DEFAULT_CONFIG = {
     "port": 8081,
     "host": "0.0.0.0",
@@ -61,10 +98,83 @@ DEFAULT_CONFIG = {
     "cookie_file": None,
     "proxy": None,
     "api_keys": [],
+    "accounts": None,
     "temporary_chats": False,
 }
 
-CONFIG = dict(DEFAULT_CONFIG)
+CONFIG = ContextConfig(DEFAULT_CONFIG)
+
+
+def resolve_account_from_config(config: dict, api_key: str):
+    """Find the account config associated with a given API key."""
+    if not api_key:
+        return None
+    accounts = config.get("accounts")
+    if not accounts:
+        return None
+
+    if isinstance(accounts, dict):
+        if api_key in accounts and isinstance(accounts[api_key], dict):
+            return accounts[api_key]
+        for name, acc in accounts.items():
+            if isinstance(acc, dict):
+                keys = acc.get("api_keys")
+                if isinstance(keys, list) and api_key in keys:
+                    return acc
+                if isinstance(keys, str) and api_key == keys:
+                    return acc
+                if acc.get("api_key") == api_key:
+                    return acc
+    elif isinstance(accounts, list):
+        for acc in accounts:
+            if isinstance(acc, dict):
+                keys = acc.get("api_keys")
+                if isinstance(keys, list) and api_key in keys:
+                    return acc
+                if isinstance(keys, str) and api_key == keys:
+                    return acc
+                if acc.get("api_key") == api_key:
+                    return acc
+    return None
+
+
+def get_all_api_keys(config: dict) -> list:
+    """Return all valid API keys accepted by config and accounts."""
+    keys = []
+    base_keys = config.get("api_keys")
+    if isinstance(base_keys, list):
+        keys.extend(base_keys)
+    elif isinstance(base_keys, str):
+        keys.append(base_keys)
+
+    accounts = config.get("accounts")
+    if accounts:
+        if isinstance(accounts, dict):
+            for k, v in accounts.items():
+                if isinstance(v, dict):
+                    acc_keys = v.get("api_keys")
+                    if isinstance(acc_keys, list):
+                        keys.extend(acc_keys)
+                    elif isinstance(acc_keys, str):
+                        keys.append(acc_keys)
+                    if v.get("api_key"):
+                        keys.append(v["api_key"])
+                    if not v.get("api_keys") and not v.get("api_key"):
+                        keys.append(k)
+                else:
+                    keys.append(k)
+        elif isinstance(accounts, list):
+            for acc in accounts:
+                if isinstance(acc, dict):
+                    acc_keys = acc.get("api_keys")
+                    if isinstance(acc_keys, list):
+                        keys.extend(acc_keys)
+                    elif isinstance(acc_keys, str):
+                        keys.append(acc_keys)
+                    if acc.get("api_key"):
+                        keys.append(acc["api_key"])
+    return list(dict.fromkeys(keys))
+
 
 # ─── Models ──────────────────────────────────────────────────────────────────
 # Mapping from JS source: MODE_CATEGORY enum (028-6eb337387583.js)
@@ -129,14 +239,19 @@ def log(msg: str):
         sys.stderr.flush()
 
 
+_cookie_cache = {}
+
+
 def load_cookie() -> tuple:
-    """Load cookie from file. Returns (cookie_str, sapisid)."""
+    """Load cookie from file with per-file mtime-based caching."""
     cookie_file = CONFIG.get("cookie_file")
-    if not cookie_file:
-        return "", None
-    if not os.path.exists(cookie_file):
+    if not cookie_file or not os.path.exists(cookie_file):
         return "", None
     try:
+        mtime = os.path.getmtime(cookie_file)
+        cached = _cookie_cache.get(cookie_file)
+        if cached and mtime == cached.get("mtime") and cached.get("str"):
+            return cached["str"], cached["sapisid"]
         with open(cookie_file, "r") as f:
             content = f.read().strip()
         if content.startswith("{"):
@@ -147,10 +262,12 @@ def load_cookie() -> tuple:
             cookie_str = content
             pairs = dict(p.split("=", 1) for p in cookie_str.split("; ") if "=" in p)
             sapisid = pairs.get("SAPISID", "")
+        _cookie_cache[cookie_file] = {"str": cookie_str, "sapisid": sapisid or None, "mtime": mtime}
         return cookie_str, sapisid if sapisid else None
     except Exception as e:
         log(f"Cookie load error: {e}")
-        return "", None
+        cached = _cookie_cache.get(cookie_file, {})
+        return cached.get("str", ""), cached.get("sapisid")
 
 
 def make_sapisidhash(sapisid: str) -> str:
@@ -776,24 +893,46 @@ class GeminiHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def _authorized(self):
-        keys = CONFIG.get("api_keys") or []
-        if not keys:
-            return True
-        # Authorization: Bearer <key>
+    def _extract_api_key(self):
         auth = self.headers.get("Authorization", "")
-        if auth.startswith("Bearer ") and auth[7:] in keys:
-            return True
-        # header keys (OpenAI x-api-key / Google x-goog-api-key)
+        if auth.startswith("Bearer "):
+            return auth[7:].strip()
         for h in ("x-api-key", "x-goog-api-key"):
-            if self.headers.get(h, "") in keys:
-                return True
-        # query param ?key= (Gemini CLI native style)
+            val = self.headers.get(h)
+            if val:
+                return val.strip()
         if "?" in self.path:
             for pair in self.path.split("?", 1)[1].split("&"):
-                if pair.startswith("key=") and pair[4:] in keys:
-                    return True
-        return False
+                if pair.startswith("key="):
+                    return pair[4:].strip()
+        return None
+
+    def _authorized(self):
+        all_keys = get_all_api_keys(CONFIG)
+        if not all_keys:
+            return True
+        key = self._extract_api_key()
+        if not key or key not in all_keys:
+            return False
+        if get_current_account() is None:
+            account = resolve_account_from_config(CONFIG, key)
+            if account:
+                set_current_account(account)
+        return True
+
+    def parse_request(self):
+        if not super().parse_request():
+            return False
+        key = self._extract_api_key()
+        account = resolve_account_from_config(CONFIG, key)
+        set_current_account(account)
+        return True
+
+    def handle_one_request(self):
+        try:
+            super().handle_one_request()
+        finally:
+            set_current_account(None)
 
     def do_OPTIONS(self):
         self.send_response(204)
