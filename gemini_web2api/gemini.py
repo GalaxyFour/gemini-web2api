@@ -262,11 +262,11 @@ def _build_image_payload(prompt: str, request_uuid: str, xsrf_token: str = None)
     return urllib.parse.urlencode(params)
 
 
-def _get_url(session_id: str = None) -> str:
+def _get_url(session_id: str = None, build_label: str = None) -> str:
     reqid = int(time.time()) % 1000000
     account_prefix = _account_prefix()
     params = {
-        "bl": CONFIG["gemini_bl"],
+        "bl": build_label or CONFIG["gemini_bl"],
         "hl": "en",
         "_reqid": reqid,
         "rt": "c",
@@ -412,7 +412,7 @@ def _generate_file_raw_with_curl(prompt: str, model_id: int, think_mode: int, fi
         prompt, model_id, think_mode, file_refs, extra_fields,
         xsrf_token=page_tokens.get("at"), request_uuid=request_uuid,
     )
-    url = _get_url(page_tokens.get("f_sid"))
+    url = _get_url(page_tokens.get("f_sid"), page_tokens.get("gemini_bl"))
     headers = _build_headers(request_uuid)
     request_args = {
         "data": body,
@@ -449,7 +449,8 @@ def _generate_image_raw_with_curl(prompt: str) -> str:
         request_args["proxy"] = CONFIG["proxy"]
 
     return _curl_post_with_retry(
-        _get_url(page_tokens.get("f_sid")), request_args, "Image generation"
+        _get_url(page_tokens.get("f_sid"), page_tokens.get("gemini_bl")),
+        request_args, "Image generation"
     )
 
 
@@ -516,7 +517,7 @@ def get_full_size_image(image) -> str | None:
         params = {
             "rpcids": "c8o8Fe", "hl": "en", "_reqid": int(time.time()) % 1000000,
             "rt": "c", "source-path": f"{_account_prefix()}/app/{image.cid}",
-            "bl": CONFIG["gemini_bl"],
+            "bl": page_tokens.get("gemini_bl") or CONFIG["gemini_bl"],
         }
         if page_tokens.get("f_sid"):
             params["f.sid"] = page_tokens["f_sid"]

@@ -13,6 +13,7 @@ from gemini_web2api.gemini import (
     _build_image_payload,
     _build_model_headers,
     _build_payload,
+    _get_url,
     _generate_file_with_curl,
     extract_response_text,
     generate_image_structured,
@@ -332,6 +333,26 @@ class PageTokenTests(unittest.TestCase):
         urlopen.return_value.read.return_value = b'{"thykhd":"legacy-token"}'
 
         self.assertEqual(_get_page_tokens()["at"], "legacy-token")
+
+    @mock.patch("gemini_web2api.multimodal.urllib.request.urlopen")
+    @mock.patch("gemini_web2api.multimodal.load_cookie", return_value=("", None))
+    def test_page_tokens_capture_current_build_and_image_model(self, _load_cookie, urlopen):
+        urlopen.return_value.read.return_value = (
+            b'{"cfb2h":"boq_gemini-web-uiserver_20261002.02_p0",'
+            b'"sylssb":"[[\\"a74ec8485b3b5ce4\\",\\"cf41b0e0dd7d53e5\\",'
+            b'\\"8c46e95b1a07cecc\\"]]"}'
+        )
+
+        tokens = _get_page_tokens()
+
+        self.assertEqual(tokens["gemini_bl"], "boq_gemini-web-uiserver_20261002.02_p0")
+        self.assertEqual(tokens["image_model"], ("cf41b0e0dd7d53e5", "2", "6"))
+
+    def test_get_url_accepts_page_build_label(self):
+        url = _get_url("session", "boq_gemini-web-uiserver_20261002.02_p0")
+
+        self.assertIn("bl=boq_gemini-web-uiserver_20261002.02_p0", url)
+        self.assertIn("f.sid=session", url)
 
 
 class RemoteImageFetchTests(unittest.TestCase):

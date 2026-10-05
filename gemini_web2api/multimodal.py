@@ -69,9 +69,20 @@ def _get_page_tokens() -> dict:
                 r'"SNlM0e":\s*"([^"]+)"',
                 r'"thykhd":\s*"([^"]+)"',
             ),
+            # Gemini changes its batchexecute build label independently of
+            # the service's configured default. Reuse the page's current
+            # label for StreamGenerate requests after frontend rollouts.
+            "gemini_bl": (r'"cfb2h":\s*"([^"]+)"',),
             # The account page carries the available image model as an
             # internal ID, capacity tail, and model category.
-            "image_model": (r'\["(cf[a-f0-9]{14})",\s*(\d+),\s*(6)\]',),
+            "image_model": (
+                # Older page payloads exposed the complete model tuple.
+                r'\["(cf[a-f0-9]{14})",\s*(\d+),\s*(6)\]',
+                # Current pages nest the model IDs in an escaped JSON list.
+                # Keep the known image-capable IDs ahead of the generic
+                # fallback so rollouts can change the selected route.
+                r'sylssb.{0,2000}?((?:cf|8c|1d)[a-f0-9]{14})',
+            ),
         }
         for key, candidates in patterns.items():
             match = None
@@ -80,8 +91,11 @@ def _get_page_tokens() -> dict:
                 if match:
                     break
             if match:
-                tokens[key] = (match.groups() if key == "image_model"
-                               else match.group(1))
+                if key == "image_model":
+                    groups = match.groups()
+                    tokens[key] = groups if len(groups) == 3 else (groups[0], "2", "6")
+                else:
+                    tokens[key] = match.group(1)
         return tokens
     except Exception as e:
         log(f"Page token fetch failed: {e}")
