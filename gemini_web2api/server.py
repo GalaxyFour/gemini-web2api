@@ -86,6 +86,13 @@ def _generated_image_output(prompt: str, response_format: str):
     """Generate one image and return its optional text plus OpenAI output data."""
     result = generate_image_structured(prompt)
     if not result.images:
+        details = []
+        if result.error:
+            details.append(result.error)
+        if result.text:
+            details.append(result.text)
+        if details:
+            raise RuntimeError(f"Gemini rejected image generation: {' - '.join(details)}")
         raise RuntimeError("Gemini returned no generated image metadata")
     source_url = get_full_size_image(result.images[0]) or result.images[0].url
     if response_format == "url":

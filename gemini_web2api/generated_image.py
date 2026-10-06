@@ -48,6 +48,7 @@ class GenerationResult:
     text: str = ""
     images: list[GeneratedImage] = field(default_factory=list)
     raw: str = ""
+    error: str | None = None
 
 
 def _nested(value: Any, indexes: list[int], default: Any = None) -> Any:
@@ -94,11 +95,19 @@ def extract_generation_result(raw: str, clean_text) -> GenerationResult:
     images: list[GeneratedImage] = []
     seen = set()
     cid = rid = ""
+    unavailable_error = None
     for frame in _wrb_payloads(raw):
         metadata = _nested(frame, [1], [])
         if isinstance(metadata, list):
             cid = _nested(metadata, [0], cid) or cid
             rid = _nested(metadata, [1], rid) or rid
+        frame_meta = frame[2] if isinstance(frame, list) and len(frame) > 2 and isinstance(frame[2], dict) else None
+        if frame_meta and "11" in frame_meta:
+            val = frame_meta["11"]
+            if isinstance(val, list) and val:
+                unavailable_error = str(val[0])
+            elif isinstance(val, str):
+                unavailable_error = val
         candidates = _nested(frame, [4], [])
         if not isinstance(candidates, list):
             continue
@@ -131,7 +140,7 @@ def extract_generation_result(raw: str, clean_text) -> GenerationResult:
                     rid=rid if isinstance(rid, str) else "",
                     rcid=rcid if isinstance(rcid, str) else "",
                 ))
-    return GenerationResult(text=clean_text(text), images=images, raw=raw)
+    return GenerationResult(text=clean_text(text), images=images, raw=raw, error=unavailable_error)
 
 
 def _validated_https_url(url: str, allowed_hosts: set[str]) -> str:
