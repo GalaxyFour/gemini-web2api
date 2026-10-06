@@ -556,8 +556,8 @@ def _generate_file_with_curl(prompt: str, model_id: int, think_mode: int, file_r
 def _generate_raw(prompt: str, model_id: int, think_mode: int, file_refs: list = None,
                   extra_fields: dict = None) -> str:
     """Generate once and retain the raw frames for structured rich-content parsing."""
-    if file_refs:
-        return _generate_file_raw_with_curl(prompt, model_id, think_mode, file_refs, extra_fields)
+    if file_refs or (extra_fields and (49 in extra_fields or extra_fields.get(49))):
+        return _generate_file_raw_with_curl(prompt, model_id, think_mode, file_refs or [], extra_fields)
 
     body = _build_payload(prompt, model_id, think_mode, extra_fields=extra_fields).encode()
     url = _get_url()

@@ -21,6 +21,8 @@
 - **Codex CLI**: Responses API (`/v1/responses`) 兼容 OpenAI Codex
 - **Gemini CLI**: Google 原生 API (`/v1beta/models`) 兼容 Gemini CLI
 - **图片输出**: 支持 OpenAI Images 和 Responses 图片生成输出，并对下载进行边界与格式校验
+- **视频与媒体生成**: 支持异步视频生成 (`POST /v1/videos`)，以及 Canvas 画布、音乐、图像生成模型
+- **多账号路由**: 支持 API Key 到 Google 账号/Cookie 映射，方便多租户管理
 
 ## 快速开始
 
@@ -91,6 +93,10 @@ gemini
 | `gemini-3.1-pro` | 高级数学与代码 (需 cookie) | ~1.2万字 |
 | `gemini-auto` | 自动选择模型 | 不定 |
 | `gemini-flash-lite` | 最快响应, 轻量 | ~1万字 |
+| `gemini-video` | 视频生成 (Veo, 异步任务); 返回 MP4 / 视频 data URL | 视频 |
+| `gemini-image` | 图像生成 (Nano Banana); 返回图片 data URL | 图像 |
+| `gemini-music` | 音乐生成 (Lyria, ~30s); 返回音频 data URL | 音频 |
+| `gemini-canvas` | 画布生成: 内联生成交互式 HTML 完整应用 | HTML |
 
 ### 思考深度
 
@@ -267,6 +273,49 @@ base64 输出仅使用 Chrome 模拟下载 HTTPS 的精确或子域
 与 HTTP Content-Type 一致。配置项 `generated_image_max_bytes` 与
 `generated_image_max_redirects` 可以进一步降低限制，
 但不能超过硬编码的 10 MiB / 3 次重定向上限。
+
+## 视频生成 (Sora / OpenAI 异步格式)
+
+支持兼容 OpenAI 规范的异步视频生成端点:
+
+- `POST /v1/videos` (或 `/v1/videos/generations`): 提交视频生成任务
+- `GET /v1/videos/{id}`: 轮询任务状态 (`queued`, `in_progress`, `completed`, `failed`)
+- `GET /v1/videos/{id}/content`: 下载生成的 MP4 视频文件
+
+#### 示例
+
+```bash
+# 1. 提交任务
+curl -X POST http://localhost:8081/v1/videos \
+  -H "Authorization: Bearer ***" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "A cute red panda walking in a lush green bamboo forest", "model": "gemini-video"}'
+
+# 2. 轮询状态
+curl http://localhost:8081/v1/videos/video_abc123 \
+  -H "Authorization: Bearer ***"
+
+# 3. 完成后下载 MP4
+curl -O http://localhost:8081/v1/videos/video_abc123/content \
+  -H "Authorization: Bearer ***"
+```
+
+## 媒体模型 (Canvas, Music, Image)
+
+除普通文本与视觉对话外，还支持通过 `/v1/chat/completions` 调用媒体专用模型:
+
+- `model: "gemini-canvas"`: 生成完整的单文件交互式 HTML 应用 (内联作为 ````html ... ```` 代码块返回).
+- `model: "gemini-music"`: 生成约 30 秒的 Lyria 音乐，以音频 data URL 形式返回.
+- `model: "gemini-image"`: 生成图像并以 Markdown 图片 data URL 形式返回.
+- `model: "gemini-video"`: 生成视频并以视频 data URL 形式返回.
+
+```python
+resp = client.chat.completions.create(
+    model="gemini-canvas",
+    messages=[{"role": "user", "content": "制作一个带音效的番茄钟应用"}]
+)
+print(resp.choices[0].message.content)
+```
 
 ## 已知限制
 

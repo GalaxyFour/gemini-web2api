@@ -21,6 +21,8 @@ Convert Google Gemini's web interface into an OpenAI-compatible API. Zero cost, 
 - **Codex CLI**: Responses API (`/v1/responses`) for OpenAI Codex integration
 - **Gemini CLI**: Google native API (`/v1beta/models`) for Gemini CLI compatibility
 - **Image Output**: OpenAI Images and Responses image-generation output with bounded, verified downloads
+- **Video & Media Generation**: Asynchronous Video generation (`POST /v1/videos`), plus Canvas, Music, and Image models
+- **Multi-Account Routing**: API Key-to-Account mapping for multi-tenant and multi-cookie setups
 
 ## Quick Start
 
@@ -101,6 +103,10 @@ Supports Google native API endpoints:
 | `gemini-3.1-pro` | Advanced math & code (needs cookie) | ~12k chars |
 | `gemini-auto` | Auto model selection | varies |
 | `gemini-flash-lite` | Fastest answers, lightweight | ~10k chars |
+| `gemini-video` | Video generation (Veo, async); returns MP4 / video data URL | video |
+| `gemini-image` | Image generation (Nano Banana); returns image data URL | image |
+| `gemini-music` | Music generation (Lyria, ~30s); returns audio data URL | audio |
+| `gemini-canvas` | Canvas: generates interactive HTML document inline | HTML |
 
 ### Thinking Depth
 
@@ -299,6 +305,52 @@ PNG, JPEG, and WebP bytes and their HTTP content type must agree.
 `generated_image_max_bytes` and
 `generated_image_max_redirects` in configuration can lower these limits, but cannot raise
 the hard 10 MiB / three-redirect caps.
+
+## Video Generation (Sora / OpenAI format)
+
+Asynchronous video generation is available via OpenAI-compatible endpoints:
+
+- `POST /v1/videos` (or `/v1/videos/generations`): submit video generation task
+- `GET /v1/videos/{id}`: check task status (`queued`, `in_progress`, `completed`, `failed`)
+- `GET /v1/videos/{id}/content`: download the generated MP4 file
+
+#### Example
+
+```bash
+# 1. Submit task
+curl -X POST http://localhost:8081/v1/videos \
+  -H "Authorization: Bearer ***" \
+  -H "Content-Type: application/json" \
+  -d '{"prompt": "A cute red panda walking in a lush green bamboo forest, cinematic lighting, 4k", "model": "gemini-video"}'
+
+# Response:
+# {"id": "video_abc123", "object": "video", "model": "gemini-video", "status": "queued", ...}
+
+# 2. Poll status
+curl http://localhost:8081/v1/videos/video_abc123 \
+  -H "Authorization: Bearer ***"
+
+# 3. Download MP4 when completed
+curl -O http://localhost:8081/v1/videos/video_abc123/content \
+  -H "Authorization: Bearer ***"
+```
+
+## Media Models (Canvas, Music, Image)
+
+In addition to standard text and vision chat, dedicated media models can be invoked via `/v1/chat/completions`:
+
+- `model: "gemini-canvas"`: Generates complete, interactive single-file HTML applications (returned inline as ````html ... ```` blocks).
+- `model: "gemini-music"`: Generates 30-second audio compositions via Lyria, returned as audio data URLs.
+- `model: "gemini-image"`: Generates image output returned as markdown image data URLs.
+- `model: "gemini-video"`: Generates video output returned as video data URLs.
+
+```python
+resp = client.chat.completions.create(
+    model="gemini-canvas",
+    messages=[{"role": "user", "content": "Create an interactive Pomodoro timer with sound effects"}]
+)
+print(resp.choices[0].message.content)
+```
 
 ## Limitations
 

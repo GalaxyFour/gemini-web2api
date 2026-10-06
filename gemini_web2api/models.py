@@ -3,6 +3,11 @@
 # MODE_CATEGORY enum from 028-6eb337387583.js:
 #   1=FAST, 2=THINKING, 3=PRO, 4=AUTO, 5=FAST_DYNAMIC_THINKING, 6=FLASH_LITE
 
+TOOL_IMAGE = 14
+TOOL_MUSIC = 21
+TOOL_CANVAS = 2
+TOOL_VIDEO = 11
+
 MODELS = {
     "gemini-3.8-flash": {
         "mode": 1, "think": 4,
@@ -55,6 +60,22 @@ MODELS = {
     "gemini-flash-lite": {
         "mode": 6, "think": 4,
         "desc": "Lightweight fast model",
+    },
+    "gemini-image": {
+        "mode": 1, "think": 4, "tool": TOOL_IMAGE,
+        "desc": "Image generation (Nano Banana); returns a base64 data URL; needs a signed-in cookie",
+    },
+    "gemini-music": {
+        "mode": 1, "think": 4, "tool": TOOL_MUSIC,
+        "desc": "Music generation (Lyria, ~30s); returns a base64 data URL; needs a signed-in cookie",
+    },
+    "gemini-video": {
+        "mode": 1, "think": 4, "tool": TOOL_VIDEO,
+        "desc": "Video generation (Veo, async); returns a base64 data URL; needs a signed-in cookie",
+    },
+    "gemini-canvas": {
+        "mode": 1, "think": 4, "tool": TOOL_CANVAS,
+        "desc": "Canvas: generates an interactive HTML document (returned inline as a ```html block); needs a signed-in cookie",
     },
 }
 

@@ -1,6 +1,8 @@
 """HTTP server: OpenAI-compatible API endpoints."""
 from __future__ import annotations
 
+import threading
+
 import base64
 import itertools
 import json
@@ -19,6 +21,7 @@ from .config import (
     set_current_account,
 )
 from .gemini import (
+    extract_response_text,
     generate,
     generate_image_structured,
     generate_stream,
@@ -26,7 +29,22 @@ from .gemini import (
     log,
 )
 from .generated_image import download_generated_image, resolve_generated_image_url
-from .models import MODELS, resolve_model
+from .models import (
+    MODELS,
+    TOOL_CANVAS,
+    TOOL_IMAGE,
+    TOOL_MUSIC,
+    TOOL_VIDEO,
+    resolve_model,
+)
+from .media import (
+    MediaArtifact,
+    append_artifact_markdown,
+    delete_conversation,
+    extract_canvas_doc,
+    extract_conversation_id,
+    fetch_media_artifacts,
+)
 from .multimodal import detect_image_mime, fetch_image_bytes, upload_image
 from .tools import (
     google_contents_to_prompt,
@@ -127,6 +145,64 @@ def _upload_images(images: list) -> list:
         except Exception as e:
             raise RuntimeError(f"image upload failed: {e}") from e
     return file_refs if file_refs else None
+
+
+
+# ─── Video Generation Jobs (Async Sora/OpenAI style) ──────────────────────────
+
+_VIDEO_JOBS: dict[str, dict] = {}
+_VIDEO_JOBS_LOCK = threading.Lock()
+
+
+def _put_video_job(job: dict) -> None:
+    with _VIDEO_JOBS_LOCK:
+        cutoff = time.time() - 2 * 3600
+        expired = [jid for jid, old in _VIDEO_JOBS.items() if old.get("created_at", 0) < cutoff]
+        for jid in expired:
+            _VIDEO_JOBS.pop(jid, None)
+        _VIDEO_JOBS[job["id"]] = job
+
+
+def _get_video_job(job_id: str) -> Optional[dict]:
+    with _VIDEO_JOBS_LOCK:
+        return _VIDEO_JOBS.get(job_id)
+
+
+def _run_video_job(job: dict) -> None:
+    job["status"] = "in_progress"
+    model_name = job.get("model", "gemini-video")
+    prompt = job.get("prompt", "")
+    _, model_id, think_mode, err, extra_fields = resolve_model(model_name)
+    if err:
+        job["status"] = "failed"
+        job["error"] = err
+        return
+
+    try:
+        from .gemini import _generate_raw, load_cookie
+        from .multimodal import _cached_page_tokens
+        cookie_str, sapisid = load_cookie()
+        page_tokens = _cached_page_tokens(max_age=0)
+        xsrf = page_tokens.get("at", "")
+
+        raw_resp = _generate_raw(prompt, model_id, think_mode, extra_fields=extra_fields)
+        cid = extract_conversation_id(raw_resp)
+        arts = fetch_media_artifacts(
+            TOOL_VIDEO, raw_resp, cid, cookie_str, sapisid, xsrf, "video/mp4"
+        )
+        if not arts:
+            job["status"] = "failed"
+            job["error"] = "no video produced"
+            return
+        a = arts[0]
+        job["mp4"] = a.data
+        job["mime"] = a.mime or "video/mp4"
+        job["status"] = "completed"
+        if CONFIG.get("temporary_chats", False) and cid:
+            threading.Thread(target=delete_conversation, args=(cid, cookie_str, sapisid, xsrf), daemon=True).start()
+    except Exception as e:
+        job["status"] = "failed"
+        job["error"] = str(e)
 
 
 class GeminiHandler(BaseHTTPRequestHandler):
@@ -247,6 +323,8 @@ class GeminiHandler(BaseHTTPRequestHandler):
                      "supportedGenerationMethods": ["generateContent", "streamGenerateContent"]}
                     for n, c in MODELS.items()
                 ]})
+            elif self.path.startswith("/v1/videos"):
+                self._handle_video_get()
             elif self.path == "/":
                 self.send_json({"status": "ok", "version": __version__, "models": list(MODELS.keys())})
             else:
@@ -264,6 +342,8 @@ class GeminiHandler(BaseHTTPRequestHandler):
                 self._handle_chat(body)
             elif self.path == "/v1/images/generations":
                 self._handle_image_generation(body)
+            elif self.path in ("/v1/videos", "/v1/videos/generations"):
+                self._handle_create_video(body)
             elif self.path == "/v1/responses":
                 self._handle_responses(body)
             elif ":streamGenerateContent" in self.path:
@@ -280,6 +360,83 @@ class GeminiHandler(BaseHTTPRequestHandler):
                 self.send_json({"error": {"message": str(e)}}, 500)
             except:
                 pass
+
+    # ─── /v1/videos & /v1/videos/generations ─────────────────────────────────
+
+    def _handle_create_video(self, body: bytes):
+        req = self._parse_body(body)
+        if not isinstance(req, dict):
+            self.send_json({"error": {"message": "invalid JSON"}}, 400)
+            return
+        prompt = req.get("prompt")
+        if not isinstance(prompt, str) or not prompt.strip():
+            self.send_json({"error": {"message": "missing prompt", "type": "invalid_request_error"}}, 400)
+            return
+        model = req.get("model", "gemini-video")
+        model_cfg = MODELS.get(model)
+        if not model_cfg or model_cfg.get("tool") != TOOL_VIDEO:
+            self.send_json({"error": {"message": "model must be a video model (gemini-video)", "type": "invalid_request_error"}}, 400)
+            return
+
+        job_id = f"video_{uuid.uuid4().hex}"
+        job = {
+            "id": job_id,
+            "object": "video",
+            "model": model,
+            "status": "queued",
+            "created_at": int(time.time()),
+            "prompt": prompt,
+        }
+        _put_video_job(job)
+        threading.Thread(target=_run_video_job, args=(job,), daemon=True).start()
+        self.send_json(job)
+
+    def _handle_video_get(self):
+        clean_path = self.path.split("?")[0]
+        rest = clean_path[len("/v1/videos"):].strip("/")
+        if not rest:
+            with _VIDEO_JOBS_LOCK:
+                jobs = [
+                    {"id": j["id"], "object": j.get("object", "video"), "model": j.get("model"),
+                     "status": j.get("status"), "created_at": j.get("created_at"), "prompt": j.get("prompt")}
+                    for j in _VIDEO_JOBS.values()
+                ]
+            self.send_json({"object": "list", "data": jobs})
+            return
+
+        parts = rest.split("/", 1)
+        job_id = parts[0]
+        job = _get_video_job(job_id)
+        if not job:
+            self.send_json({"error": {"message": "video job not found", "type": "not_found"}}, 404)
+            return
+
+        if len(parts) == 2 and parts[1] == "content":
+            status = job.get("status")
+            mp4_bytes = job.get("mp4")
+            mime = job.get("mime", "video/mp4")
+            if status != "completed" or not mp4_bytes:
+                self.send_json({"error": {"message": f"video not ready (status={status})", "type": "not_found"}}, 404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", mime)
+            self.send_header("Content-Length", str(len(mp4_bytes)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(mp4_bytes)
+            return
+
+        resp_job = {
+            "id": job["id"],
+            "object": job.get("object", "video"),
+            "model": job.get("model"),
+            "status": job.get("status"),
+            "created_at": job.get("created_at"),
+            "prompt": job.get("prompt"),
+        }
+        if job.get("error"):
+            resp_job["error"] = job["error"]
+        self.send_json(resp_job)
 
     # ─── /v1/images/generations ───────────────────────────────────────────────
 
@@ -449,8 +606,44 @@ class GeminiHandler(BaseHTTPRequestHandler):
             return
 
         try:
-            text = (precomputed_text if precomputed_text is not None else
-                    generate(prompt, model_id, think_mode, file_refs, extra_fields))
+            model_cfg = MODELS.get(model_name, {})
+            media_tool = model_cfg.get("tool")
+            if precomputed_text is not None:
+                text = precomputed_text
+            elif media_tool is not None:
+                from .gemini import _generate_raw, load_cookie
+                from .multimodal import _cached_page_tokens
+                tool_extra = dict(extra_fields or {})
+                tool_extra[49] = media_tool
+                if media_tool == TOOL_VIDEO:
+                    tool_extra[55] = [[16]]
+                raw_resp = _generate_raw(prompt, model_id, think_mode, file_refs or [], tool_extra)
+                if media_tool == TOOL_CANVAS:
+                    doc = extract_canvas_doc(raw_resp)
+                    raw_text = extract_response_text(raw_resp)
+                    if not doc:
+                        text = raw_text
+                    elif raw_text and raw_text not in doc:
+                        text = f"{raw_text}\n\n{doc}"
+                    else:
+                        text = doc
+                else:
+                    cookie_str, sapisid = load_cookie()
+                    page_tokens = _cached_page_tokens(max_age=0)
+                    xsrf = page_tokens.get("at", "")
+                    cid_raw = extract_conversation_id(raw_resp)
+                    default_mime = "image/png"
+                    if media_tool == TOOL_MUSIC:
+                        default_mime = "audio/mpeg"
+                    elif media_tool == TOOL_VIDEO:
+                        default_mime = "video/mp4"
+                    arts = fetch_media_artifacts(media_tool, raw_resp, cid_raw, cookie_str, sapisid, xsrf, default_mime)
+                    raw_text = extract_response_text(raw_resp)
+                    text = append_artifact_markdown(raw_text, arts)
+                    if CONFIG.get("temporary_chats", False) and cid_raw:
+                        threading.Thread(target=delete_conversation, args=(cid_raw, cookie_str, sapisid, xsrf), daemon=True).start()
+            else:
+                text = generate(prompt, model_id, think_mode, file_refs, extra_fields)
         except Exception as e:
             self.send_json({"error": {"message": f"upstream error: {e}"}}, 502)
             return
